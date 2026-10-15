@@ -15,7 +15,6 @@ from src.ui_components import (
 from src.f1_data import get_driver_quali_telemetry
 from src.f1_data import FPS
 from src.lib.time import format_time
-from src.lib.textures import TextureManager
 
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
@@ -101,7 +100,7 @@ class QualifyingReplay(arcade.Window):
             ("H", "Toggle Help Popup"),
             ("ESC", "Close Window"),
         ])
-        self.controls_popup_comp.set_size(300, 280)
+        self.controls_popup_comp.set_size(340, 250)
         self.controls_popup_comp.set_font_sizes(header_font_size=16, body_font_size=13)
 
         # Build the track layout from an example lap
@@ -131,6 +130,15 @@ class QualifyingReplay(arcade.Window):
         ref_points = self._interpolate_points(self.plot_x_ref, self.plot_y_ref, interp_points=4000)
         self._ref_xs = np.array([p[0] for p in ref_points])
         self._ref_ys = np.array([p[1] for p in ref_points])
+
+        # Forward tangents along the reference line — used to orient driver
+        # arrows in the direction of travel.
+        _dx = np.gradient(self._ref_xs)
+        _dy = np.gradient(self._ref_ys)
+        _norm = np.sqrt(_dx**2 + _dy**2)
+        _norm[_norm == 0] = 1.0
+        self._ref_tx = _dx / _norm
+        self._ref_ty = _dy / _norm
 
         # cumulative distances along the reference polyline (metres)
         diffs = np.sqrt(np.diff(self._ref_xs)**2 + np.diff(self._ref_ys)**2)
@@ -627,7 +635,7 @@ class QualifyingReplay(arcade.Window):
                         c_px = comp_tel.get("x")
                         c_py = comp_tel.get("y")
                         c_sx, c_sy = world_to_map(c_px, c_py)
-                        arcade.draw_circle_filled(c_sx, c_sy, 6, arcade.color.YELLOW)
+                        self._draw_driver_arrow(c_px, c_py, c_sx, c_sy, arcade.color.YELLOW)
 
                     # Draw DRS zones on track map as green highlights
                     if self.drs_zones_xy and self.toggle_drs_zones:
@@ -674,7 +682,7 @@ class QualifyingReplay(arcade.Window):
                             if r.get("code") == self.loaded_driver_code and r.get("color"):
                                 drv_color = tuple(r.get("color"))
                                 break
-                    arcade.draw_circle_filled(sx, sy, 6, drv_color)
+                    self._draw_driver_arrow(px, py, sx, sy, drv_color)
 
                     # Overlay current gear near the position marker on the track
                     cur_gear = tel.get("gear") or tel.get("nGear") or tel.get("Gear")
@@ -741,6 +749,25 @@ class QualifyingReplay(arcade.Window):
         sy = self.world_scale * y + self.ty
         return sx, sy
 
+    def _draw_driver_arrow(self, world_x, world_y, sx, sy, color):
+        """Draw a driver marker as a directional arrow pointing along the track."""
+        if world_x is None or world_y is None or len(self._ref_xs) == 0:
+            arcade.draw_circle_filled(sx, sy, 6, color)
+            return
+        d = (self._ref_xs - world_x) ** 2 + (self._ref_ys - world_y) ** 2
+        idx = int(np.argmin(d))
+        tx = self._ref_tx[idx]
+        ty = self._ref_ty[idx]
+        size = 8
+        arcade.draw_polygon_filled(
+            [
+                (sx + tx * size, sy + ty * size),
+                (sx - tx * size * 0.5 - ty * size * 0.6, sy - ty * size * 0.5 + tx * size * 0.6),
+                (sx - tx * size * 0.5 + ty * size * 0.6, sy - ty * size * 0.5 - tx * size * 0.6),
+            ],
+            color,
+        )
+
     def _pick_telemetry_value(self, tel: dict, *keys):
         """Return the first value for keys that exists in tel and is not None.
         Preserves falsy-but-valid values like 0.0."""
@@ -801,14 +828,11 @@ class QualifyingReplay(arcade.Window):
             self.toggle_drs_zones = not self.toggle_drs_zones
             return
         elif symbol == arcade.key.H:
-            # Toggle Controls popup — anchored above the legend box so it never
-            # overlaps the legend that opens it.
-            margin_x = 12
-            legend = getattr(self, "legend_comp", None)
-            legend_top = legend.y - legend.controls_text_offset + 6 if legend else 220
-            popup_bottom = legend_top + 8
+            # Toggle Controls popup with 'H' key — show anchored to bottom-left with 20px margin
+            margin_x = 20
+            margin_y = 20
             left_pos = float(margin_x)
-            top_pos = float(popup_bottom + self.controls_popup_comp.height)
+            top_pos = float(margin_y + self.controls_popup_comp.height)
             if self.controls_popup_comp.visible:
                 self.controls_popup_comp.hide()
             else:
@@ -1036,7 +1060,6 @@ class QualifyingReplay(arcade.Window):
             self.paused = self.was_paused_before_hold
 
 def run_qualifying_replay(session, data, title="Qualifying Results", ready_file=None):
-    TextureManager.get().load_all()
     window = QualifyingReplay(session=session, data=data, title=title)
     # Signal readiness to parent process (if requested) after window created
     if ready_file:

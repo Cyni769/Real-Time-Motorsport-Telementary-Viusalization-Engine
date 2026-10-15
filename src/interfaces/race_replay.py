@@ -34,12 +34,8 @@ class F1RaceReplayWindow(arcade.Window):
                  race_control_messages=None):
         # Set resizable to True so the user can adjust mid-sim
         super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, title, resizable=True)
-
-        # Do NOT call self.maximize() here: on some compositors (notably
-        # Wayland/Hyprland) pyglet's Wayland backend crashes when a window is
-        # maximized/fullscreened before its surface is fully ready, and doing so
-        # during __init__ also races the first render. We defer it to the first
-        # update tick instead (see on_update).
+        # Defer maximize() out of __init__: on Wayland (pyglet 2.1) maximizing
+        # before the surface is ready crashes. Do it on the first update tick.
         self._maximize_pending = True
 
         self.telemetry_stream = None
@@ -93,7 +89,7 @@ class F1RaceReplayWindow(arcade.Window):
         self.driver_info_comp = DriverInfoComponent(left=20, width=300)
         self.controls_popup_comp = ControlsPopupComponent()
 
-        self.controls_popup_comp.set_size(360, 300) # fits within left_ui_margin
+        self.controls_popup_comp.set_size(340, 250) # width/height of the popup box
         self.controls_popup_comp.set_font_sizes(header_font_size=16, body_font_size=13) # adjust font sizes
         self.degradation_integrator = None
         if session is not None:
@@ -167,10 +163,6 @@ class F1RaceReplayWindow(arcade.Window):
          self.x_min, self.x_max,
          self.y_min, self.y_max, self.drs_zones) = build_track_from_example_lap(example_lap)
 
-        # Cached track-centre (immutable after construction)
-        self._world_cx = (self.x_min + self.x_max) / 2
-        self._world_cy = (self.y_min + self.y_max) / 2
-
         # Build a dense reference polyline (used for projecting car (x,y) -> along-track distance)
         ref_points = self._interpolate_points(self.plot_x_ref, self.plot_y_ref, interp_points=4000)
         # store as numpy arrays for vectorized ops
@@ -184,7 +176,9 @@ class F1RaceReplayWindow(arcade.Window):
         norm[norm == 0] = 1.0
         self._ref_nx = -dy / norm
         self._ref_ny = dx / norm
-        # Tangent vectors (heading direction along the track)
+
+        # Forward tangents (true track direction, not flipped by the winding
+        # correction below) — used to orient driver arrows along the line.
         self._ref_tx = dx / norm
         self._ref_ty = dy / norm
 
@@ -214,9 +208,6 @@ class F1RaceReplayWindow(arcade.Window):
         self.screen_inner_points = []
         self.screen_outer_points = []
         
-        # Precomputed screen-space DRS zone polylines (list of list-of-tuples)
-        self._screen_drs_polylines = []
-
         # Scaling parameters (initialized to 0, calculated in update_scaling)
         self.world_scale = 1.0
         self.tx = 0
@@ -233,9 +224,6 @@ class F1RaceReplayWindow(arcade.Window):
         self.time_text = arcade.Text("", 20, self.height - 80, arcade.color.WHITE, 20, anchor_y="top")
         self.status_text = arcade.Text("", 20, self.height - 120, arcade.color.WHITE, 24, bold=True, anchor_y="top")
 
-        # Cache of driver label Text objects (created lazily, mutated per frame)
-        self._driver_label_texts = {}
-
         # Trigger initial scaling calculation
         self.update_scaling(self.width, self.height)
 
@@ -244,46 +232,9 @@ class F1RaceReplayWindow(arcade.Window):
         self.leaderboard_rects = []  # list of tuples: (code, left, bottom, right, top)
         # store previous leaderboard order for up/down arrows
         self.last_leaderboard_order = None
-
-        # View presets: Race (default), Minimal, Telemetry
-        self._view_presets = ["Race", "Minimal", "Telemetry"]
-        self._view_preset_index = 0
         
         # Broadcast initial telemetry state
         self._broadcast_telemetry_state()
-
-    def _apply_view_preset(self, preset_name: str):
-        """Apply a named view preset controlling which HUD elements are visible."""
-        if preset_name == "Race":
-            self.visible_hud = True
-            self.leaderboard_comp.visible = True
-            self.weather_comp.visible = True
-            self.legend_comp.visible = True
-            self.race_controls_comp.visible = True
-            self.session_info_comp.visible = True
-            self.progress_bar_comp.visible = True
-            self.show_driver_labels = False
-            self.toggle_drs_zones = True
-        elif preset_name == "Minimal":
-            self.visible_hud = False
-            self.leaderboard_comp.visible = False
-            self.weather_comp.visible = False
-            self.legend_comp.visible = False
-            self.race_controls_comp.visible = True
-            self.session_info_comp.visible = False
-            self.progress_bar_comp.visible = False
-            self.show_driver_labels = False
-            self.toggle_drs_zones = False
-        elif preset_name == "Telemetry":
-            self.visible_hud = True
-            self.leaderboard_comp.visible = True
-            self.weather_comp.visible = True
-            self.legend_comp.visible = False
-            self.race_controls_comp.visible = True
-            self.session_info_comp.visible = True
-            self.progress_bar_comp.visible = True
-            self.show_driver_labels = True
-            self.toggle_drs_zones = True
 
     def _broadcast_telemetry_state(self):
         """Broadcast current telemetry state to connected clients."""
@@ -1231,9 +1182,9 @@ class F1RaceReplayWindow(arcade.Window):
         perfectly within the new screen dimensions while maintaining aspect ratio.
         """
         padding = 0.05
-        # Use pre-cached centre (set once in __init__)
-        world_cx = self._world_cx
-        world_cy = self._world_cy
+        # If a rotation is applied, we must compute the rotated bounds
+        world_cx = (self.x_min + self.x_max) / 2
+        world_cy = (self.y_min + self.y_max) / 2
 
         def _rotate_about_center(x, y):
             # Translate to centre, rotate, translate back
@@ -1264,9 +1215,7 @@ class F1RaceReplayWindow(arcade.Window):
         # never overlaps side UI elements (leaderboard, telemetry, legends).
         inner_w = max(1.0, screen_w - self.left_ui_margin - self.right_ui_margin)
         usable_w = inner_w * (1 - 2 * padding)
-
-        inner_h = max(1.0, screen_h)
-        usable_h = inner_h * (1 - 2 * padding)
+        usable_h = screen_h * (1 - 2 * padding)
 
         # Calculate scale to fit whichever dimension is the limiting factor
         scale_x = usable_w / world_w
@@ -1275,6 +1224,7 @@ class F1RaceReplayWindow(arcade.Window):
 
         # Center the world in the screen (rotation done about original centre)
         # world_cx/world_cy are unchanged by rotation about centre
+        # Center within the available inner area (left_ui_margin .. screen_w - right_ui_margin)
         screen_cx = self.left_ui_margin + inner_w / 2
         screen_cy = screen_h / 2
 
@@ -1285,34 +1235,14 @@ class F1RaceReplayWindow(arcade.Window):
         self.screen_inner_points = [self.world_to_screen(x, y) for x, y in self.world_inner_points]
         self.screen_outer_points = [self.world_to_screen(x, y) for x, y in self.world_outer_points]
 
-        # Precompute DRS zone screen polylines (avoids per-frame work)
-        self._precompute_drs_polylines()
-
-    def _precompute_drs_polylines(self):
-        """Precompute screen-space DRS zone polylines (called from update_scaling)."""
-        self._screen_drs_polylines = []
-        if not (hasattr(self, 'drs_zones') and self.drs_zones):
-            return
-        for zone in self.drs_zones:
-            start_idx = zone["start"]["index"]
-            end_idx = zone["end"]["index"]
-            points = []
-            for i in range(start_idx, min(end_idx + 1, len(self.x_outer))):
-                sx, sy = self.world_to_screen(self.x_outer.iloc[i], self.y_outer.iloc[i])
-                points.append((sx, sy))
-            if len(points) > 1:
-                self._screen_drs_polylines.append(points)
-
     def on_resize(self, width, height):
         """Called automatically by Arcade when window is resized."""
         super().on_resize(width, height)
-        # Recomputed geometry must never take the app down: a bad size mid-drag
-        # (e.g. a zero/negative transient from the compositor) should be skipped,
-        # not crash the replay.
+        # A transient bad size mid-drag can raise; skip rather than crash
         try:
             self.update_scaling(width, height)
-        except Exception as e:
-            print(f"Note: resize scaling skipped ({width}x{height}): {e}")
+        except Exception:
+            return
         # notify components
         self.leaderboard_comp.x = max(20, self.width - self.right_ui_margin + 12)
         for c in (self.leaderboard_comp, self.weather_comp, self.legend_comp, self.driver_info_comp, self.progress_bar_comp, self.race_controls_comp):
@@ -1328,8 +1258,8 @@ class F1RaceReplayWindow(arcade.Window):
 
     def world_to_screen(self, x, y):
         # Rotate around the track centre (if rotation is set), then scale+translate
-        world_cx = self._world_cx
-        world_cy = self._world_cy
+        world_cx = (self.x_min + self.x_max) / 2
+        world_cy = (self.y_min + self.y_max) / 2
 
         if self._rot_rad:
             tx = x - world_cx
@@ -1399,55 +1329,54 @@ class F1RaceReplayWindow(arcade.Window):
             arcade.draw_line_strip(self.screen_outer_points, track_color, 4)
         
         # 2.5 Draw DRS Zones (green segments on outer track edge)
-        if self.toggle_drs_zones and self._screen_drs_polylines:
+        if hasattr(self, 'drs_zones') and self.drs_zones and self.toggle_drs_zones:
             drs_color = (0, 255, 0)  # Bright green for DRS zones
-            for polyline in self._screen_drs_polylines:
-                arcade.draw_line_strip(polyline, drs_color, 6)
+            
+            for _, zone in enumerate(self.drs_zones):
+                start_idx = zone["start"]["index"]
+                end_idx = zone["end"]["index"]
+                
+                # Extract the outer track points for this DRS zone segment
+                drs_outer_points = []
+                for i in range(start_idx, min(end_idx + 1, len(self.x_outer))):
+                    x = self.x_outer.iloc[i]
+                    y = self.y_outer.iloc[i]
+                    sx, sy = self.world_to_screen(x, y)
+                    drs_outer_points.append((sx, sy))
+                
+                # Draw the DRS zone segment
+                if len(drs_outer_points) > 1:
+                    arcade.draw_line_strip(drs_outer_points, drs_color, 6)
 
         draw_finish_line(self)
         # 3. Draw Cars
-        # Use the *raw* float frame index to interpolate between two discrete
-        # frames, so cars move smoothly even at high playback speed / while
-        # holding seek — no more discrete-frame teleporting jitter.
-        f_idx = float(self.frame_index)
-        base = int(f_idx)
-        base = max(0, min(base, self.n_frames - 1))
-        nxt = min(base + 1, self.n_frames - 1)
-        frac = f_idx - base
-        frame = self.frames[base]
-        next_frame = self.frames[nxt]
+        frame = self.frames[idx]
         
         # Get selected drivers list safely
         selected_drivers = getattr(self, "selected_drivers", [])
         if not selected_drivers and getattr(self, "selected_driver", None):
             selected_drivers = [self.selected_driver]
 
-        for i, code in enumerate(frame["drivers"]):
-            pos = frame["drivers"][code]
-            nxt_pos = next_frame["drivers"].get(code, pos) if next_frame is not frame else pos
-
-            # Interpolate world position between base and next frame
-            x = pos["x"] + (nxt_pos["x"] - pos["x"]) * frac
-            y = pos["y"] + (nxt_pos["y"] - pos["y"]) * frac
-            sx, sy = self.world_to_screen(x, y)
+        for i, (code, pos) in enumerate(frame["drivers"].items()):
+            sx, sy = self.world_to_screen(pos["x"], pos["y"])
             color = self.driver_colors.get(code, arcade.color.WHITE)
             
             is_selected = code in selected_drivers
 
-            # Find closest point index on reference track for heading direction
-            _, ref_idx = self.track_tree.query([x, y])
-            ref_idx = int(ref_idx)
+            # Closest point on the reference line — gives the car heading for
+            # the arrow below and the normal used for driver labels.
+            _, idx = self.track_tree.query([pos["x"], pos["y"]])
+            idx = int(idx)
 
-            # Get tangent (heading) in world space and rotate to screen space
-            tx = self._ref_tx[ref_idx]
-            ty = self._ref_ty[ref_idx]
+            # Draw the car as a directional arrow pointing along the track
+            tx = self._ref_tx[idx]
+            ty = self._ref_ty[idx]
             if self._rot_rad:
                 stx = tx * self._cos_rot - ty * self._sin_rot
                 sty = tx * self._sin_rot + ty * self._cos_rot
             else:
                 stx, sty = tx, ty
 
-            # Draw car as a directional triangle pointing along heading
             size = 8
             apex_x = sx + stx * size
             apex_y = sy + sty * size
@@ -1457,13 +1386,14 @@ class F1RaceReplayWindow(arcade.Window):
             base_ry = sy - sty * size * 0.5 - stx * size * 0.6
             arcade.draw_polygon_filled(
                 [(apex_x, apex_y), (base_lx, base_ly), (base_rx, base_ry)],
-                color
+                color,
             )
-            
+
             if self.show_driver_labels or is_selected:
-                # Get normal vector in world space for label offset
-                nx = self._ref_nx[ref_idx]
-                ny = self._ref_ny[ref_idx]
+                # Get normal vector in world space
+                nx = self._ref_nx[idx]
+
+                ny = self._ref_ny[idx]
                 
                 # Rotate normal to screen space
                 if self._rot_rad:
@@ -1481,19 +1411,8 @@ class F1RaceReplayWindow(arcade.Window):
                 
                 anchor_x = "left" if snx >= 0 else "right"
                 text_padding = 3 if snx >= 0 else -3
-                label = self._driver_label_texts.get(code)
-                if label is None:
-                    label = arcade.Text(code, 0, 0, color, 10,
-                                        anchor_x=anchor_x, anchor_y="center", bold=True)
-                    self._driver_label_texts[code] = label
-                else:
-                    label.anchor_x = anchor_x
-                label.text = code
-                label.x = lx + text_padding
-                label.y = ly
-                label.color = color
-                label.draw()
-        
+                arcade.draw_text(code, lx + text_padding, ly, color, 10, anchor_x=anchor_x, anchor_y="center", bold=True)
+
         # 3b. Draw Safety Car (if active)
         sc_data = frame.get("safety_car")
         if sc_data is not None:
@@ -1561,47 +1480,33 @@ class F1RaceReplayWindow(arcade.Window):
                 )
         
         # --- UI ELEMENTS (Dynamic Positioning) ---
+        
+        # Determine Leader info using projected along-track distance (more robust than dist)
+        # Use the progress metric in metres for each driver and use that to order the leaderboard.
+        driver_progress = {}
+        for code, pos in frame["drivers"].items():
+            # parse lap defensively
+            lap_raw = pos.get("lap", 1)
+            try:
+                lap = int(lap_raw)
+            except Exception:
+                lap = 1
 
-        # Only compute the per-driver along-track projection (KD-Tree lookups) when
-        # something actually consumes it: the HUD leader display, the leaderboard,
-        # or a connected telemetry client. Avoids per-frame cost otherwise.
-        needs_progress = (
-            self.visible_hud
-            or self.leaderboard_comp.visible
-            or self.telemetry_stream is not None
-        )
+            # Project (x,y) to reference and combine with lap count
+            projected_m = self._project_to_reference(pos.get("x", 0.0), pos.get("y", 0.0))
 
-        if needs_progress:
-            # Determine Leader info using projected along-track distance (more robust than dist)
-            # Use the progress metric in metres for each driver and use that to order the leaderboard.
-            driver_progress = {}
-            for code, pos in frame["drivers"].items():
-                # parse lap defensively
-                lap_raw = pos.get("lap", 1)
-                try:
-                    lap = int(lap_raw)
-                except Exception:
-                    lap = 1
+            # progress in metres since race start: (lap-1) * lap_length + projected_m
+            progress_m = float((max(lap, 1) - 1) * self._ref_total_length + projected_m)
 
-                # Project (x,y) to reference and combine with lap count
-                projected_m = self._project_to_reference(pos.get("x", 0.0), pos.get("y", 0.0))
+            driver_progress[code] = progress_m
 
-                # progress in metres since race start: (lap-1) * lap_length + projected_m
-                progress_m = float((max(lap, 1) - 1) * self._ref_total_length + projected_m)
-
-                driver_progress[code] = progress_m
-
-            # Leader is the one with greatest progress_m
-            if driver_progress:
-                leader_code = max(driver_progress, key=lambda c: driver_progress[c])
-                leader_lap = frame["drivers"][leader_code].get("lap", 1)
-            else:
-                leader_code = None
-                leader_lap = 1
+        # Leader is the one with greatest progress_m
+        if driver_progress:
+            leader_code = max(driver_progress, key=lambda c: driver_progress[c])
+            leader_lap = frame["drivers"][leader_code].get("lap", 1)
         else:
-            driver_progress = {}
             leader_code = None
-            leader_lap = frame.get("lap", 1)
+            leader_lap = 1
 
         # Time Calculation
         t = frame["t"]
@@ -1641,13 +1546,11 @@ class F1RaceReplayWindow(arcade.Window):
                 self.status_text.draw()
 
         # Weather component (set info then draw)
-        # WeatherComponent.draw() sets window.weather_bottom to the correct value.
         weather_info = frame.get("weather") if frame else None
         self.weather_comp.set_info(weather_info)
         self.weather_comp.draw(self)
-        # Fallback to a sensible default if no weather rendered this frame
-        if not weather_info and not self.has_weather:
-            self.weather_bottom = None
+        # optionally expose weather_bottom for driver info layout
+        self.weather_bottom = self.height - 170 - 130 if (weather_info or self.has_weather) else None
 
         # Draw leaderboard via component
         driver_list = []
@@ -1685,18 +1588,14 @@ class F1RaceReplayWindow(arcade.Window):
         self.progress_bar_comp.draw_overlays(self)
                     
     def on_update(self, delta_time: float):
-        self.race_controls_comp.on_update(delta_time)
-
-        # Defer the initial maximize until the very first update tick, once the
-        # GL surface is ready. This avoids pyglet/Wayland crashes from maximizing
-        # during __init__. If the compositor rejects it, log and continue rather
-        # than taking the whole app down.
+        # Apply the deferred maximize once the window surface is ready
         if self._maximize_pending:
             self._maximize_pending = False
             try:
                 self.maximize()
-            except Exception as e:
-                print(f"Note: initial maximize failed: {e}")
+            except Exception:
+                pass
+        self.race_controls_comp.on_update(delta_time)
         
         seek_speed = 3.0 * max(1.0, self.playback_speed) # Multiplier for seeking speed, scales with current playback speed
         if self.is_rewinding:
@@ -1781,14 +1680,11 @@ class F1RaceReplayWindow(arcade.Window):
         elif symbol == arcade.key.L:
             self.show_driver_labels = not self.show_driver_labels
         elif symbol == arcade.key.H:
-            # Toggle Controls popup with 'H' key — anchored above the legend
-            # box (bottom-left) so it never overlaps the legend that opens it.
-            legend = getattr(self, "legend_comp", None)
-            legend_top = legend.y - legend.controls_text_offset + 6 if legend else 220
-            margin_x = 12
-            popup_bottom = legend_top + 8
+            # Toggle Controls popup with 'H' key — show anchored to bottom-left with 20px margin
+            margin_x = 20
+            margin_y = 20
             left_pos = float(margin_x)
-            top_pos = float(popup_bottom + self.controls_popup_comp.height)
+            top_pos = float(margin_y + self.controls_popup_comp.height)
             if self.controls_popup_comp.visible:
                 self.controls_popup_comp.hide()
             else:
@@ -1797,11 +1693,6 @@ class F1RaceReplayWindow(arcade.Window):
             self.progress_bar_comp.toggle_visibility() # toggle progress bar visibility
         elif symbol == arcade.key.I:
             self.session_info_comp.toggle_visibility() # toggle session info banner
-        elif symbol == arcade.key.V:
-            # Cycle through view presets: Race -> Minimal -> Telemetry -> Race
-            self._view_preset_index = (self._view_preset_index + 1) % len(self._view_presets)
-            preset = self._view_presets[self._view_preset_index]
-            self._apply_view_preset(preset)
 
     def on_key_release(self, symbol: int, modifiers: int):
         if symbol == arcade.key.RIGHT:

@@ -6,13 +6,11 @@ import time
 import arcade
 from src.interfaces.race_replay import F1RaceReplayWindow
 from src.insights.telemetry_stream_viewer import main as telemetry_viewer_main
-from src.lib.textures import TextureManager
 
 def run_arcade_replay(frames, track_statuses, example_lap, drivers, title,
                       playback_speed=1.0, driver_colors=None, circuit_rotation=0.0, total_laps=None,
                       visible_hud=True, ready_file=None, session_info=None, session=None,
                       enable_telemetry=True, race_control_messages=None):
-    TextureManager.get().load_all()
     window = F1RaceReplayWindow(
         frames=frames,
         track_statuses=track_statuses,
