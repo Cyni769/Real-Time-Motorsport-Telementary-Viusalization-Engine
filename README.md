@@ -83,19 +83,3 @@ venv/bin/python -m pytest
 
 Tests never open GUI windows, OpenGL contexts or download data — CI runs them
 headless with `MPLBACKEND=Agg` (see `.github/workflows/tests.yml`).
-
-Project notes for AI assistants live in `AGENTS.md`.
-
-## 📝 License
-
-This project is licensed under the MIT License.
-
-## ⚠️ Disclaimer
-
-No copyright infringement intended. Formula 1 and related trademarks are the
-property of their respective owners. All data used is sourced from publicly
-available APIs and is used for educational and non-commercial purposes only.
-
----
-
-Built with ❤️ by [Tom Shaw](https://tomshaw.dev)
