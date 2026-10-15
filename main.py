@@ -1,3 +1,9 @@
+import warnings
+
+# pyglet warns when the system FFmpeg is newer than its known-good list. The
+# app does not use pyglet's media playback, so this warning is just noise.
+warnings.filterwarnings("ignore", message="FFmpeg release version not found")
+
 from src.f1_data import get_race_telemetry, enable_cache, get_circuit_rotation, load_session, get_quali_telemetry, list_rounds, list_sprints
 from src.run_session import run_arcade_replay, launch_insights_menu
 from src.interfaces.qualifying import run_qualifying_replay
@@ -9,13 +15,15 @@ from src.lib.season import get_season
 import logging
 
 def main(year=None, round_number=None, playback_speed=1, session_type='R', visible_hud=True, ready_file=None, show_telemetry_viewer=True):
+  # Enable the FastF1 cache BEFORE any fastf1 call. Otherwise load_session()
+  # below runs without the cache and re-downloads the session from the network
+  # on every launch (startup went from ~13s to minutes).
+  enable_cache()
+
   print(f"Loading F1 {year} Round {round_number} Session '{session_type}'")
   session = load_session(year, round_number, session_type)
 
   print(f"Loaded session: {session.event['EventName']} - {session.event['RoundNumber']} - {session_type}")
-
-  # Enable cache for fastf1
-  enable_cache()
 
   if session_type == 'Q' or session_type == 'SQ':
 
