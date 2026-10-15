@@ -3,23 +3,56 @@ from PySide6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox
 )
 from PySide6.QtWidgets import QProgressDialog
-from PySide6.QtCore import QThread, Signal, Qt, QTimer
+from PySide6.QtCore import QObject, Signal, Qt, QTimer
 #from PySide6.QtGui import QPixmap, QFont
 import sys
 import os
 import subprocess
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from src.f1_data import get_race_weekends_by_year, get_race_weekends_by_place, get_all_unique_race_names, load_session
 from src.gui.settings_dialog import SettingsDialog
 from src.lib.season import get_season
 
-# Worker thread to fetch schedule without blocking UI
-class FetchScheduleWorker(QThread):
+class _BackgroundWorker(QObject):
+    """Run a job on a daemon Python thread and report back via Qt signals.
+
+    Deliberately NOT a QThread: a QThread that is still running when the
+    interpreter shuts down makes PySide abort with "QThread: Destroyed while
+    thread is still running" (typically when the window is closed while a
+    fetch is in flight). Daemon threads are simply killed at exit instead.
+    Qt signals emitted from a plain Python thread are queued to the main
+    thread automatically, so receivers still get them safely.
+    """
     result = Signal(object)
     error = Signal(str)
+    finished = Signal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._thread = None
+
+    def run(self):
+        raise NotImplementedError
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run_safe, daemon=True)
+        self._thread.start()
+
+    def _run_safe(self):
+        try:
+            self.run()
+        finally:
+            self.finished.emit()
+
+    def isRunning(self):
+        return self._thread is not None and self._thread.is_alive()
+
+
+# Worker to fetch schedule without blocking UI
+class FetchScheduleWorker(_BackgroundWorker):
     def __init__(self, year, parent=None):
         super().__init__(parent)
         self.year = year
@@ -41,6 +74,8 @@ class RaceSelectionWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self._bg_workers = set()
+        self._closed = False
         self.loading_session = False
         self.selected_session_title = None
         self.current_year = get_season()
@@ -169,6 +204,7 @@ class RaceSelectionWindow(QMainWindow):
             self.worker = FetchScheduleWorker(int(year))
             self.worker.result.connect(self.populate_schedule)
             self.worker.error.connect(self.show_error)
+            self._track_worker(self.worker)
             self.worker.start()
             return
         
@@ -342,10 +378,7 @@ class RaceSelectionWindow(QMainWindow):
         elif session_label == "Sprint":
             session_code = 'S'
 
-        class FetchSessionWorker(QThread):
-            result = Signal(object)
-            error = Signal(str)
-
+        class FetchSessionWorker(_BackgroundWorker):
             def __init__(self, year, round_no, session_type, parent=None):
                 super().__init__(parent)
                 self.year = year
@@ -365,6 +398,9 @@ class RaceSelectionWindow(QMainWindow):
                     self.error.emit(str(e))
 
         def _on_loaded(session_obj):
+            # Window may have been closed while loading; don't touch dead widgets
+            if self._closed:
+                return
             # create a unique ready-file path and pass it to the child
             ready_path = os.path.join(tempfile.gettempdir(), f"f1_ready_{uuid.uuid4().hex}")
             cmd_with_ready = list(cmd) + ["--ready-file", ready_path]
@@ -418,6 +454,8 @@ class RaceSelectionWindow(QMainWindow):
                 dlg.close()
             except Exception:
                 pass
+            if self._closed:
+                return
             QMessageBox.critical(self, "Load error", f"Failed to load session data:\n{msg}")
 
         worker = FetchSessionWorker(year, round_no, session_code)
@@ -425,7 +463,25 @@ class RaceSelectionWindow(QMainWindow):
         worker.error.connect(_on_error)
         # Keep a reference so it doesn't get GC'd
         self._session_worker = worker
+        self._track_worker(worker)
         worker.start()
+    def _track_worker(self, worker):
+        """Keep background QThreads alive until they finish.
+
+        Without this, replacing or destroying a still-running worker raises
+        "QThread: Destroyed while thread is still running" and aborts the app.
+        """
+        self._bg_workers.add(worker)
+        worker.finished.connect(lambda: self._bg_workers.discard(worker))
+
+    def closeEvent(self, event):
+        # Fetch workers are daemon threads now: they are killed with the
+        # process, so closing is instant and cannot abort in Qt teardown.
+        # Just flag the shutdown so late queued signals don't touch dead
+        # widgets.
+        self._closed = True
+        super().closeEvent(event)
+
     def show_error(self, message):
         QMessageBox.critical(self, "Error", f"Failed to load schedule: {message}")
         self.loading_session = False

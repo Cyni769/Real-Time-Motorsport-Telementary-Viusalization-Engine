@@ -1,8 +1,14 @@
 import sys
 from collections import deque
 
+import os
 import matplotlib
-matplotlib.use("QtAgg")
+
+backend = os.environ.get("MPLBACKEND")
+if backend:
+    matplotlib.use(backend)
+else:
+    matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.ticker as ticker
